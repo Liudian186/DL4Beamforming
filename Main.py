@@ -4,19 +4,38 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 from LoadData import MYDataset, load_data
 from Model import BeamformingModel  # 确保模型包含子网络输出
+from Creating import create_weighted_target, iq_to_image
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 epochs = 500
 mid = 30
 
 # 加载数据
-(zero_RF, neg_RF, pos_RF, zero_img, neg_img, pos_img, target_img, grid_shape) = (
-    load_data()
-)
+(
+    zero_RF,
+    neg_RF,
+    pos_RF,
+    zero_img,
+    neg_img,
+    pos_img,
+    target_img,
+    grid_shape,
+    cf_img,
+    mv_img,
+) = load_data()
 
 # 创建数据集
 dataset = MYDataset(
-    zero_RF, neg_RF, pos_RF, zero_img, neg_img, pos_img, target_img, grid_shape
+    zero_RF,
+    neg_RF,
+    pos_RF,
+    zero_img,
+    neg_img,
+    pos_img,
+    target_img,
+    grid_shape,
+    cf_img,
+    mv_img,
 )
 
 # 划分训练集和验证集
@@ -39,6 +58,9 @@ criterion = nn.MSELoss()
 subnet_weights = [0.2, 0.2, 0.2]  # 三个子网络权重
 final_weight = 0.4  # 最终输出权重
 
+# 在文件开头添加新的权重定义
+final_weights = {"target": 0.4, "cf": 0.3, "mv": 0.3}
+
 train_losses = []
 val_losses = []
 
@@ -49,19 +71,22 @@ losses = {
         "subnet1": [],
         "subnet2": [],
         "subnet3": [],
-        "fusion": {"train": [], "val": []},  # 修改为包含train和val的字典
+        "fusion": {
+            "train": {"target": [], "cf": [], "mv": [], "total": []},
+            "val": {"target": [], "cf": [], "mv": [], "total": []},
+        },
     },
 }
 
+SUBNET_WEIGHTS = [0.2, 0.2, 0.2]  # 子网络权重
+FINAL_WEIGHTS = {
+    "target": 0.4,  # 目标图像权重
+    "cf": 0.3,  # CF图像权重
+    "mv": 0.3,  # MV图像权重
+}
 
-def iq_to_image(iq_data):
-    """将I/Q数据转换为B模式图像"""
-    I = iq_data[:, 0, :, :]
-    Q = iq_data[:, 1, :, :]
-    magnitude = torch.sqrt(I**2 + Q**2)
-    if torch.isnan(magnitude).any():
-        print("NaN detected in magnitude!")
-    return 20 * torch.log10(magnitude + 1e-6)
+# 添加固定权重常量
+TARGET_WEIGHTS = {"target": 0.4, "cf": 0.3, "mv": 0.3}
 
 
 # 冻结融合网络的参数
@@ -84,6 +109,8 @@ for epoch in range(mid):
             pos_img,
             target_img,
             grid_shape,
+            cf_img,
+            mv_img,
         ) = batch
 
         inputs = [zero_RF.to(device), neg_RF.to(device), pos_RF.to(device)]
@@ -92,6 +119,8 @@ for epoch in range(mid):
             "neg": neg_img.to(device),
             "pos": pos_img.to(device),
             "final": target_img.to(device),
+            "cf": cf_img.to(device),
+            "mv": mv_img.to(device),
         }
         target_h, target_w = grid_shape[0, 0], grid_shape[0, 1]
 
@@ -156,6 +185,8 @@ for epoch in range(mid, epochs):
             pos_img,
             target_img,
             grid_shape,
+            cf_img,
+            mv_img,
         ) = batch
 
         inputs = [zero_RF.to(device), neg_RF.to(device), pos_RF.to(device)]
@@ -164,6 +195,8 @@ for epoch in range(mid, epochs):
             "neg": neg_img.to(device),
             "pos": pos_img.to(device),
             "final": target_img.to(device),
+            "cf": cf_img.to(device),
+            "mv": mv_img.to(device),
         }
         target_h, target_w = grid_shape[0, 0], grid_shape[0, 1]
 
@@ -182,14 +215,22 @@ for epoch in range(mid, epochs):
         # 计算最终输出损失
         final_img = iq_to_image(final_output)
         final_img = final_img - torch.amax(final_img)
-        final_loss = criterion(final_img, target_imgs["final"])
 
-        # 总损失包含子网络和最终输出的损失
-        total_loss = final_weight * final_loss
-        for w, l in zip(subnet_weights, subnet_losses):
+        # 创建加权目标图像
+        weighted_target = create_weighted_target(
+            TARGET_WEIGHTS, target_imgs["final"], target_imgs["cf"], target_imgs["mv"]
+        )
+
+        # 计算损失
+        final_loss = criterion(final_img, weighted_target)
+
+        # 总损失计算保持不变:
+        total_loss = final_loss
+        for w, l in zip(SUBNET_WEIGHTS, subnet_losses):
             total_loss += w * l
 
-        total_loss.backward()
+        # 添加retain_graph=True
+        total_loss.backward(retain_graph=True)
         optimizer.step()
 
         running_loss += total_loss.item()
@@ -203,7 +244,9 @@ for epoch in range(mid, epochs):
     for i in range(3):
         avg_loss = subnet_epoch_losses[i] / len(train_loader)
         losses["stage2"][f"subnet{i+1}"].append(avg_loss)
-    losses["stage2"]["fusion"]["train"].append(fusion_epoch_loss / len(train_loader))
+
+    # 移除原来的多目标损失记录
+    losses["stage2"]["fusion"]["train"]["total"].append(final_loss.item())
 
     # 验证集评估
     model.eval()
@@ -220,6 +263,8 @@ for epoch in range(mid, epochs):
                 pos_img,
                 target_img,
                 grid_shape,
+                cf_img,
+                mv_img,
             ) = batch
 
             inputs = [zero_RF.to(device), neg_RF.to(device), pos_RF.to(device)]
@@ -228,17 +273,37 @@ for epoch in range(mid, epochs):
                 "neg": neg_img.to(device),
                 "pos": pos_img.to(device),
                 "final": target_img.to(device),
+                "cf": cf_img.to(device),
+                "mv": mv_img.to(device),
             }
             target_h, target_w = grid_shape[0, 0], grid_shape[0, 1]
 
             final_output, _ = model(inputs, (target_h, target_w))
             final_img = iq_to_image(final_output)
             final_img = final_img - torch.amax(final_img)
-            val_loss = criterion(final_img, target_imgs["final"])
+
+            # 创建加权目标图像
+            weighted_target = create_weighted_target(
+                TARGET_WEIGHTS,
+                target_imgs["final"],
+                target_imgs["cf"],
+                target_imgs["mv"],
+            )
+
+            # 计算验证损失
+            val_loss = criterion(final_img, weighted_target)
             val_fusion_loss += val_loss.item()
 
-    # 存储验证损失
-    losses["stage2"]["fusion"]["val"].append(val_fusion_loss / len(val_loader))
+    avg_val_loss = val_fusion_loss / len(val_loader)
+    losses["stage2"]["fusion"]["val"]["total"].append(avg_val_loss)
+
+    # 移除不需要的验证损失记录
+    """
+    losses["stage2"]["fusion"]["val"]["target"].append(final_losses["target"].item())
+    losses["stage2"]["fusion"]["val"]["cf"].append(final_losses["cf"].item())
+    losses["stage2"]["fusion"]["val"]["mv"].append(final_losses["mv"].item())
+    """
+
     model.train()
 
     # 记录训练损失
@@ -261,6 +326,8 @@ with torch.no_grad():
             pos_img,
             target_img,
             grid_shape,
+            cf_img,
+            mv_img,
         ) = batch
 
         inputs = [zero_RF.to(device), neg_RF.to(device), pos_RF.to(device)]
@@ -269,6 +336,8 @@ with torch.no_grad():
             "neg": neg_img.to(device),
             "pos": pos_img.to(device),
             "final": target_img.to(device),
+            "cf": cf_img.to(device),
+            "mv": mv_img.to(device),
         }
         target_h, target_w = grid_shape[0, 0], grid_shape[0, 1]
 
@@ -321,13 +390,13 @@ for i in range(3):
     )
 plt.plot(
     range(mid, epochs),
-    losses["stage2"]["fusion"]["train"],
+    losses["stage2"]["fusion"]["train"]["total"],
     label="Fusion Net (Train)",
     linestyle="--",
 )
 plt.plot(
     range(mid, epochs),
-    losses["stage2"]["fusion"]["val"],
+    losses["stage2"]["fusion"]["val"]["total"],
     label="Fusion Net (Val)",
     linestyle=":",
 )
@@ -359,6 +428,8 @@ def generate_comparison_images(loader, dataset_type):
                 pos_img,
                 target_img,
                 grid_shape,
+                cf_img,
+                mv_img,
             ) = batch
 
             inputs = [zero_RF.to(device), neg_RF.to(device), pos_RF.to(device)]

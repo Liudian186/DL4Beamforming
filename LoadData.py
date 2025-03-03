@@ -1,5 +1,6 @@
 import torch
 import os
+import pandas as pd
 import matplotlib.pyplot as plt
 from torch.utils.data import Dataset
 from PlaneWaveData import MYOData, TSHData
@@ -24,6 +25,8 @@ class MYDataset(Dataset):
         pos_img,
         target_images,
         grid_shape,
+        cf_img,
+        mv_img,
     ):
         self.zero_RF = zero_RF
         self.neg_RF = neg_RF
@@ -33,6 +36,8 @@ class MYDataset(Dataset):
         self.pos_img = pos_img
         self.target_images = target_images
         self.grid_shape = grid_shape
+        self.cf_img = cf_img
+        self.mv_img = mv_img
 
     def __len__(self):
         return len(self.zero_RF)
@@ -47,6 +52,8 @@ class MYDataset(Dataset):
             self.pos_img[idx],
             self.target_images[idx],
             self.grid_shape[idx],
+            self.cf_img[idx],
+            self.mv_img[idx],
         )
 
 
@@ -59,6 +66,8 @@ def load_data():
     neg_img = []
     pos_img = []
     target_images = []
+    cf_img = []
+    mv_img = []
     grid_shape = []
 
     # 加载MYO数据集
@@ -111,7 +120,7 @@ def load_data():
         grid_shape.append(temp_grid.shape[:-1])
 
     # 加载TSH数据集
-    for i in range(1, 61):
+    for i in range(1, 11):
 
         database_path = os.path.join("database", "TSH")
         data_idx = i + 1
@@ -122,7 +131,7 @@ def load_data():
         xlims = [temp.ele_pos[0, 0], temp.ele_pos[-1, 0]]
         zlims = [10e-3, 45e-3]
         wvln = temp.c / temp.fc
-        dx = wvln / 3
+        dx = wvln / 2.5
         dz = dx
         temp_grid = make_pixel_grid(xlims, zlims, dx, dz)
 
@@ -155,6 +164,20 @@ def load_data():
 
         # 全角度target图像
         target_images.append(DAS2img(temp, temp_grid))
+
+        # 全角度cf图像
+        cf_filename = "TSH" + str(data_idx).zfill(3) + "CFFull.csv"
+        cf_path = os.path.join(database_path, cf_filename)
+        cf_data = pd.read_csv(cf_path, header=None, skiprows=1)
+        cf_tensor = torch.tensor(cf_data.values, dtype=torch.float32)
+        cf_img.append(cf_tensor)
+
+        # 全角度mv图像
+        mv_filename = "TSH" + str(data_idx).zfill(3) + "MVFull.csv"
+        mv_path = os.path.join(database_path, mv_filename)
+        mv_data = pd.read_csv(mv_path, header=None, skiprows=1)
+        mv_tensor = torch.tensor(mv_data.values, dtype=torch.float32)
+        mv_img.append(mv_tensor)
 
         # 记录像素网格形状
         grid_shape.append(temp_grid.shape[:-1])
@@ -197,17 +220,37 @@ def load_data():
         pos_img,
         target_images,
         grid_shape,
+        cf_img,
+        mv_img,
     )
 
 
 if __name__ == "__main__":
 
-    zero_RF, neg_RF, pos_RF, zero_img, neg_img, pos_img, target_images, grid_shape = (
-        load_data()
-    )
+    (
+        zero_RF,
+        neg_RF,
+        pos_RF,
+        zero_img,
+        neg_img,
+        pos_img,
+        target_images,
+        grid_shape,
+        cf_img,
+        mv_img,
+    ) = load_data()
 
     mydata = MYDataset(
-        zero_RF, neg_RF, pos_RF, zero_img, neg_img, pos_img, target_images, grid_shape
+        zero_RF,
+        neg_RF,
+        pos_RF,
+        zero_img,
+        neg_img,
+        pos_img,
+        target_images,
+        grid_shape,
+        cf_img,
+        mv_img,
     )
 
     mydata_loader = torch.utils.data.DataLoader(mydata, batch_size=1)
@@ -222,6 +265,8 @@ if __name__ == "__main__":
             pos_img,
             target_images,
             grid_shape,
+            cf_img,
+            mv_img,
         ) = batch
 
         fig, axes = plt.subplots(2, 2, figsize=(12, 10))
